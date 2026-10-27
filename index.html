@@ -1,0 +1,804 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import {
+  Trophy,
+  Clock,
+  Volume2,
+  VolumeX,
+  RotateCcw,
+  Home,
+  BookOpen,
+  Settings,
+  Pause,
+  Play,
+  Eye,
+  EyeOff,
+  UserPlus,
+} from 'lucide-react';
+import {
+  GameState,
+  Question,
+  Student,
+  DuckEntity,
+  GameSettings,
+  LeaderboardEntry,
+} from './types/game';
+import { DEFAULT_QUESTIONS } from './data/defaultQuestions';
+import { DEFAULT_STUDENTS } from './data/defaultStudents';
+import { soundManager } from './utils/sound';
+import { VillageYard } from './components/VillageYard';
+import { QuestionModal } from './components/QuestionModal';
+import { StartScreen } from './components/StartScreen';
+import { RulesModal } from './components/RulesModal';
+import { LeaderboardModal } from './components/LeaderboardModal';
+import { GameOverModal } from './components/GameOverModal';
+import { TeacherSettingsModal } from './components/TeacherSettingsModal';
+import { MobileControls } from './components/MobileControls';
+
+const STORAGE_KEYS = {
+  LEADERBOARD: 'bit_mat_bat_vit_leaderboard_v1',
+  QUESTIONS: 'bit_mat_bat_vit_questions_v1',
+  STUDENTS: 'bit_mat_bat_vit_students_v1',
+  SETTINGS: 'bit_mat_bat_vit_settings_v1',
+  LAST_PLAYER: 'bit_mat_bat_vit_last_player_v1',
+};
+
+export default function App() {
+  // Game State
+  const [gameState, setGameState] = useState<GameState>('START');
+  const [isPaused, setIsPaused] = useState<boolean>(false);
+
+  // Player & Classroom info
+  const [playerName, setPlayerName] = useState<string>('');
+  const [className, setClassName] = useState<string>('');
+
+  // Scores & Counters for the active student catching ducks
+  const [score, setScore] = useState<number>(0);
+  const [timeLeft, setTimeLeft] = useState<number>(240);
+  const [correctCount, setCorrectCount] = useState<number>(0);
+  const [wrongCount, setWrongCount] = useState<number>(0);
+
+  // Modals
+  const [showRules, setShowRules] = useState<boolean>(false);
+  const [showLeaderboard, setShowLeaderboard] = useState<boolean>(false);
+  const [showTeacherSettings, setShowTeacherSettings] = useState<boolean>(false);
+  const [showSwitchPlayerModal, setShowSwitchPlayerModal] = useState<boolean>(false);
+
+  // Temporary name for switcher
+  const [tempPlayerName, setTempPlayerName] = useState<string>('');
+  const [tempClassName, setTempClassName] = useState<string>('');
+
+  // Questions & Students Banks
+  const [questions, setQuestions] = useState<Question[]>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEYS.QUESTIONS);
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // Ignored
+    }
+    return DEFAULT_QUESTIONS;
+  });
+
+  const [students, setStudents] = useState<Student[]>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEYS.STUDENTS);
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // Ignored
+    }
+    return DEFAULT_STUDENTS;
+  });
+
+  const [settings, setSettings] = useState<GameSettings>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEYS.SETTINGS);
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // Ignored
+    }
+    return {
+      blindfoldMode: 'semi',
+      gameDurationSeconds: 300,
+      duckCount: 50, // Default 50 ducks numbered 1 to 50
+      soundEnabled: true,
+    };
+  });
+
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEYS.LEADERBOARD);
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // Ignored
+    }
+    return [];
+  });
+
+  // Sound state
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
+
+  // Active ducks on field (numbered 1 to 20)
+  const [ducks, setDucks] = useState<DuckEntity[]>([]);
+  // Currently caught duck during quiz question
+  const [caughtDuck, setCaughtDuck] = useState<DuckEntity | null>(null);
+  // Current question
+  const [currentQuestion, setCurrentQuestion] = useState<Question | null>(null);
+  // Pool of unused questions for this match
+  const unusedQuestionsRef = useRef<Question[]>([]);
+
+  // Mobile virtual controls input state
+  const [virtualInput, setVirtualInput] = useState<{
+    up: boolean;
+    down: boolean;
+    left: boolean;
+    right: boolean;
+  }>({
+    up: false,
+    down: false,
+    left: false,
+    right: false,
+  });
+
+  // Load saved last player name
+  useEffect(() => {
+    try {
+      const savedPlayer = localStorage.getItem(STORAGE_KEYS.LAST_PLAYER);
+      if (savedPlayer) {
+        const parsed = JSON.parse(savedPlayer);
+        if (parsed.name) setPlayerName(parsed.name);
+        if (parsed.className) setClassName(parsed.className);
+      }
+    } catch {
+      // Ignored
+    }
+  }, []);
+
+  // Sync sound manager
+  useEffect(() => {
+    soundManager.setMuted(!soundEnabled);
+  }, [soundEnabled]);
+
+  const toggleSound = () => {
+    setSoundEnabled((prev) => {
+      const next = !prev;
+      soundManager.setMuted(!next);
+      return next;
+    });
+  };
+
+  // Save changes to localStorage
+  const handleUpdateQuestions = (newQ: Question[]) => {
+    setQuestions(newQ);
+    localStorage.setItem(STORAGE_KEYS.QUESTIONS, JSON.stringify(newQ));
+  };
+
+  const handleUpdateStudents = (newS: Student[]) => {
+    setStudents(newS);
+    localStorage.setItem(STORAGE_KEYS.STUDENTS, JSON.stringify(newS));
+  };
+
+  const handleUpdateSettings = (newSettings: GameSettings) => {
+    setSettings(newSettings);
+    localStorage.setItem(STORAGE_KEYS.SETTINGS, JSON.stringify(newSettings));
+  };
+
+  const handleClearLeaderboard = () => {
+    if (window.confirm('Bạn có chắc muốn xóa sạch bảng xếp hạng?')) {
+      setLeaderboard([]);
+      localStorage.removeItem(STORAGE_KEYS.LEADERBOARD);
+    }
+  };
+
+  // Start or Restart Game with 20 Numbered Ducks
+  const startNewGame = useCallback(() => {
+    try {
+      localStorage.setItem(
+        STORAGE_KEYS.LAST_PLAYER,
+        JSON.stringify({ name: playerName, className })
+      );
+    } catch {
+      // Ignored
+    }
+
+    setScore(0);
+    setCorrectCount(0);
+    setWrongCount(0);
+    setTimeLeft(settings.gameDurationSeconds);
+    setIsPaused(false);
+    setCaughtDuck(null);
+    setCurrentQuestion(null);
+
+    // Prepare randomized questions pool
+    unusedQuestionsRef.current = [...questions].sort(() => Math.random() - 0.5);
+
+    // Spawn up to 50 ducks numbered 1 to 50!
+    const count = Math.min(settings.duckCount, 50);
+    const colorPalette = [
+      '#EF4444', '#F59E0B', '#10B981', '#3B82F6', '#8B5CF6',
+      '#EC4899', '#06B6D4', '#F97316', '#14B8A6', '#84CC16',
+      '#A855F7', '#EAB308', '#6366F1', '#D946EF', '#0EA5E9'
+    ];
+
+    const initialDucks: DuckEntity[] = [];
+    for (let i = 0; i < count; i++) {
+      const duckNum = i + 1; // 1 to 50
+      const color = colorPalette[i % colorPalette.length];
+
+      const angle = (i / count) * Math.PI * 2;
+      // Position spread throughout the yard oval
+      const radius = 18 + ((i * 11) % 24);
+      const x = 50 + Math.cos(angle) * radius;
+      const y = 50 + Math.sin(angle) * (radius * 0.82);
+
+      const speed = 0.75 + Math.random() * 0.45;
+      const randDir = Math.random() * Math.PI * 2;
+
+      initialDucks.push({
+        id: `duck_${duckNum}_${Date.now()}`,
+        duckNumber: duckNum, // 1 to 50
+        x,
+        y,
+        vx: Math.cos(randDir) * speed,
+        vy: Math.sin(randDir) * speed,
+        speed,
+        angle: randDir,
+        color,
+        isCaught: false,
+        speechBubble: null,
+        speechTimer: 0,
+        quackTimer: Math.random() * 5 + 1.5,
+        waddlePhase: Math.random() * Math.PI * 2,
+        flapWings: false,
+        scaredTimer: 0,
+        laughTimer: 0,
+      });
+    }
+
+    setDucks(initialDucks);
+    setGameState('PLAYING');
+  }, [playerName, className, settings, questions, students]);
+
+  // Main countdown timer
+  useEffect(() => {
+    if (gameState !== 'PLAYING' || isPaused) return;
+
+    const timer = setInterval(() => {
+      setTimeLeft((prev) => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          finishGame();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [gameState, isPaused]);
+
+  // Handle Duck Touch / Catch: When Duck #N is caught, show the question for Duck #N immediately!
+  const handleCatchDuck = (duck: DuckEntity) => {
+    if (gameState !== 'PLAYING' || isPaused) return;
+
+    soundManager.playCatch();
+    setCaughtDuck(duck);
+
+    // Map duck.duckNumber (1 to 50) directly to its matching numbered question
+    const qIndex = (duck.duckNumber - 1) % (questions.length || 1);
+    const q = questions[qIndex] || questions[0];
+    setCurrentQuestion(q);
+    setGameState('QUESTION');
+  };
+
+  // Handle Quiz Result (Scores directly for the student catching the duck!)
+  const handleAnswerResult = (isCorrect: boolean) => {
+    if (!caughtDuck) return;
+
+    if (isCorrect) {
+      // Mỗi câu trả lời đúng được 10 điểm. Tổng điểm là điểm những câu trả lời đúng khi bắt được vịt.
+      const newCorrectCount = correctCount + 1;
+      const newScore = newCorrectCount * 10;
+      setCorrectCount(newCorrectCount);
+      setScore(newScore);
+
+      // Mark this numbered duck as caught (leaves active yard)
+      setDucks((prev) =>
+        prev.map((d) => (d.id === caughtDuck.id ? { ...d, isCaught: true } : d))
+      );
+
+      // Check if all ducks are caught!
+      const remainingDucks = ducks.filter((d) => !d.isCaught && d.id !== caughtDuck.id);
+      if (remainingDucks.length === 0) {
+        setGameState('PLAYING');
+        setTimeout(() => {
+          finishGame(newCorrectCount);
+        }, 300);
+        return;
+      }
+    } else {
+      setWrongCount((w) => w + 1);
+
+      // Duck escapes! Boosts speed away and laughs
+      setDucks((prev) =>
+        prev.map((d) => {
+          if (d.id === caughtDuck.id) {
+            const randAngle = Math.random() * Math.PI * 2;
+            return {
+              ...d,
+              isCaught: false,
+              vx: Math.cos(randAngle) * (d.speed * 2.5),
+              vy: Math.sin(randAngle) * (d.speed * 2.5),
+              speechBubble: `Vịt số ${d.duckNumber} chạy thoát rồi!`,
+              speechTimer: 2.8,
+              laughTimer: 2.0,
+              scaredTimer: 1.5,
+              flapWings: true,
+            };
+          }
+          return d;
+        })
+      );
+    }
+
+    setCaughtDuck(null);
+    setCurrentQuestion(null);
+    setGameState('PLAYING');
+  };
+
+  // Finish Game & Record Leaderboard: Tổng điểm là điểm những câu trả lời đúng khi bắt được vịt (mỗi câu đúng 10 điểm)
+  const finishGame = (overrideCorrectCount?: number) => {
+    setGameState('GAME_OVER');
+
+    const ducksCaughtTotal = ducks.filter((d) => d.isCaught).length;
+    const finalCorrect = overrideCorrectCount !== undefined ? overrideCorrectCount : correctCount;
+    const finalScore = finalCorrect * 10;
+    const timeSpent = settings.gameDurationSeconds - timeLeft;
+
+    const newEntry: LeaderboardEntry = {
+      id: `entry_${Date.now()}`,
+      playerName: playerName || 'Học sinh',
+      className: className || 'THCS',
+      score: finalScore,
+      ducksCaught: ducksCaughtTotal,
+      totalDucks: ducks.length || settings.duckCount,
+      correctAnswers: finalCorrect,
+      wrongAnswers: wrongCount,
+      timeSpentSeconds: timeSpent,
+      date: new Date().toLocaleDateString('vi-VN'),
+    };
+
+    setLeaderboard((prev) => {
+      const updated = [newEntry, ...prev].slice(0, 50);
+      try {
+        localStorage.setItem(STORAGE_KEYS.LEADERBOARD, JSON.stringify(updated));
+      } catch {
+        // Ignored
+      }
+      return updated;
+    });
+  };
+
+  // Format MM:SS for top HUD
+  const formatTime = (secs: number) => {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  };
+
+  // Virtual mobile direction control handler
+  const handleDirectionChange = (
+    dir: 'up' | 'down' | 'left' | 'right',
+    active: boolean
+  ) => {
+    setVirtualInput((prev) => ({ ...prev, [dir]: active }));
+  };
+
+  const remainingDucksCount = ducks.filter((d) => !d.isCaught).length;
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-amber-50 via-orange-50/50 to-amber-100/60 flex flex-col justify-between text-slate-800">
+      {/* 0. PROMINENT CREATOR BANNER AT TOP OF GAME */}
+      <div className="w-full bg-gradient-to-r from-red-700 via-amber-600 to-red-700 text-yellow-100 font-black text-xs sm:text-sm py-1.5 px-4 text-center shadow-md flex items-center justify-center gap-2 border-b-2 border-yellow-300 tracking-wide select-none">
+        <span>⭐</span>
+        <span className="text-white drop-shadow">Game tạo bởi GV Nguyễn Thị Thảo - Trường THCS Song Liễu</span>
+        <span>⭐</span>
+      </div>
+
+      {/* 1. TOP BAR NAVIGATION & HUD */}
+      <header className="w-full bg-white/90 backdrop-blur-md border-b-2 border-amber-200 shadow-sm sticky top-0 z-40 px-3 md:px-8 py-2 flex items-center justify-between gap-3">
+        {/* Brand Zone */}
+        <div className="flex items-center gap-2 shrink-0">
+          <span className="text-2xl md:text-3xl">🦆</span>
+          <div className="leading-tight">
+            <span className="text-base md:text-lg font-black text-amber-950 tracking-tight block">
+              BỊT MẮT BẮT VỊT
+            </span>
+            <span className="text-[11px] md:text-xs text-amber-800 font-bold block">
+              Game tạo bởi GV Nguyễn Thị Thảo - Trường THCS Song Liễu
+            </span>
+          </div>
+        </div>
+
+        {/* Center HUD during Active Playing */}
+        {gameState === 'PLAYING' || gameState === 'QUESTION' ? (
+          <div className="flex items-center gap-2 md:gap-5 bg-amber-100/90 border border-amber-300 rounded-2xl px-3 md:px-5 py-1.5 shadow-sm">
+            {/* Student Score */}
+            <div className="flex items-center gap-1.5">
+              <Trophy className="w-4 h-4 md:w-5 md:h-5 text-amber-600 shrink-0" />
+              <div className="leading-tight">
+                <span className="text-[10px] text-amber-800 uppercase font-black hidden sm:block">Tổng điểm</span>
+                <div className="flex items-baseline gap-1">
+                  <span className="text-base md:text-xl font-black text-amber-700 font-mono">
+                    {score}
+                  </span>
+                  <span className="text-[10px] text-amber-800 font-bold">điểm</span>
+                </div>
+              </div>
+            </div>
+
+            <span className="text-amber-300">|</span>
+
+            {/* Ducks Remaining (X/50) */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-base md:text-lg">🦆</span>
+              <div className="leading-tight">
+                <span className="text-[10px] text-amber-800 uppercase font-bold hidden sm:block">Còn lại</span>
+                <span className="text-base md:text-xl font-black text-slate-800 font-mono">
+                  {remainingDucksCount}/{ducks.length || 50}
+                </span>
+              </div>
+            </div>
+
+            <span className="text-amber-300">|</span>
+
+            {/* Timer */}
+            <div className="flex items-center gap-1.5">
+              <Clock className="w-4 h-4 md:w-5 md:h-5 text-rose-600 shrink-0" />
+              <div className="leading-tight">
+                <span className="text-[10px] text-rose-800 uppercase font-bold hidden sm:block">Thời gian</span>
+                <span className={`text-base md:text-xl font-black font-mono ${timeLeft < 30 ? 'text-rose-600 animate-pulse' : 'text-slate-800'}`}>
+                  {formatTime(timeLeft)}
+                </span>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="hidden lg:flex items-center gap-4 text-xs font-bold text-amber-900/80">
+            <span>🏮 Ngày hội Bắt Vịt Đánh Số 1 đến 20</span>
+            <span>·</span>
+            <span>Bắt được vịt nào, trả lời câu hỏi để ghi điểm!</span>
+          </div>
+        )}
+
+        {/* Right Action Icons */}
+        <div className="flex items-center gap-1 md:gap-2 shrink-0">
+          {/* Pause / Resume */}
+          {(gameState === 'PLAYING' || gameState === 'QUESTION') && (
+            <button
+              onClick={() => setIsPaused((p) => !p)}
+              className="p-2 rounded-xl bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 transition-colors cursor-pointer"
+              title={isPaused ? 'Tiếp tục' : 'Tạm dừng'}
+            >
+              {isPaused ? <Play className="w-4 h-4 fill-current" /> : <Pause className="w-4 h-4" />}
+            </button>
+          )}
+
+          {/* Quick Switch Student Button */}
+          {(gameState === 'PLAYING' || gameState === 'QUESTION') && (
+            <button
+              onClick={() => {
+                setTempPlayerName(playerName);
+                setTempClassName(className);
+                setShowSwitchPlayerModal(true);
+              }}
+              className="p-2 rounded-xl bg-emerald-100 hover:bg-emerald-200 text-emerald-900 border border-emerald-300 transition-colors cursor-pointer hidden sm:flex items-center gap-1 text-xs font-bold"
+              title="Đổi lượt cho học sinh khác bắt vịt"
+            >
+              <UserPlus className="w-4 h-4 text-emerald-700" />
+              <span>Đổi học sinh</span>
+            </button>
+          )}
+
+          {/* Blindfold mode toggle */}
+          {(gameState === 'PLAYING' || gameState === 'QUESTION') && (
+            <button
+              onClick={() => {
+                const modes: ('semi' | 'full' | 'clear')[] = ['semi', 'full', 'clear'];
+                const nextMode = modes[(modes.indexOf(settings.blindfoldMode) + 1) % modes.length];
+                handleUpdateSettings({ ...settings, blindfoldMode: nextMode });
+              }}
+              className="p-2 rounded-xl bg-amber-100 hover:bg-amber-200 text-amber-900 border border-amber-300 transition-colors cursor-pointer hidden md:flex items-center gap-1 text-xs font-bold"
+              title="Chuyển chế độ nhìn bịt mắt"
+            >
+              {settings.blindfoldMode === 'full' ? (
+                <>
+                  <EyeOff className="w-4 h-4 text-red-600" />
+                  <span>Bịt mắt</span>
+                </>
+              ) : settings.blindfoldMode === 'semi' ? (
+                <>
+                  <Eye className="w-4 h-4 text-amber-700" />
+                  <span>Sương mù</span>
+                </>
+              ) : (
+                <>
+                  <Eye className="w-4 h-4 text-emerald-600" />
+                  <span>Rõ nét</span>
+                </>
+              )}
+            </button>
+          )}
+
+          {/* Sound Toggle */}
+          <button
+            onClick={toggleSound}
+            className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 transition-colors cursor-pointer"
+            title={soundEnabled ? 'Tắt âm thanh' : 'Bật âm thanh'}
+          >
+            {soundEnabled ? (
+              <Volume2 className="w-4 h-4 text-emerald-600" />
+            ) : (
+              <VolumeX className="w-4 h-4 text-rose-500" />
+            )}
+          </button>
+
+          {/* Rules */}
+          <button
+            onClick={() => setShowRules(true)}
+            className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 transition-colors cursor-pointer"
+            title="Xem Luật chơi"
+          >
+            <BookOpen className="w-4 h-4 text-blue-600" />
+          </button>
+
+          {/* Leaderboard */}
+          <button
+            onClick={() => setShowLeaderboard(true)}
+            className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 transition-colors cursor-pointer"
+            title="Bảng xếp hạng"
+          >
+            <Trophy className="w-4 h-4 text-amber-600" />
+          </button>
+
+          {/* Teacher Bank Settings */}
+          <button
+            onClick={() => setShowTeacherSettings(true)}
+            className="p-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white transition-colors cursor-pointer shadow-sm"
+            title="Cài đặt câu hỏi & học sinh"
+          >
+            <Settings className="w-4 h-4" />
+          </button>
+
+          {/* Direct HTML Download */}
+          <a
+            href="./tro_choi_bit_mat_bat_vit.html"
+            download="tro_choi_bit_mat_bat_vit.html"
+            className="p-2 rounded-xl bg-red-600 hover:bg-red-700 text-white transition-colors cursor-pointer shadow-sm flex items-center gap-1 text-xs font-black"
+            title="Tải trọn bộ mã file HTML về máy (Mở chơi trực tiếp không cần mạng)"
+          >
+            <span>📥</span>
+            <span className="hidden sm:inline">Tải HTML</span>
+          </a>
+
+          {/* Home button */}
+          {gameState !== 'START' && (
+            <button
+              onClick={() => {
+                if (window.confirm('Quay về màn hình chính? Lượt chơi hiện tại sẽ dừng lại.')) {
+                  setGameState('START');
+                }
+              }}
+              className="p-2 rounded-xl bg-slate-800 hover:bg-slate-900 text-white transition-colors cursor-pointer"
+              title="Về Trang chủ"
+            >
+              <Home className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      </header>
+
+      {/* 2. MAIN DISPLAY CONTENT */}
+      <main className="flex-1 w-full max-w-7xl mx-auto p-2 md:p-6 flex flex-col items-center justify-center">
+        {gameState === 'START' && (
+          <StartScreen
+            playerName={playerName}
+            className={className}
+            onPlayerNameChange={setPlayerName}
+            onClassNameChange={setClassName}
+            onStartGame={startNewGame}
+            onOpenRules={() => setShowRules(true)}
+            onOpenLeaderboard={() => setShowLeaderboard(true)}
+            onOpenTeacherSettings={() => setShowTeacherSettings(true)}
+            soundEnabled={soundEnabled}
+            onToggleSound={toggleSound}
+          />
+        )}
+
+        {(gameState === 'PLAYING' || gameState === 'QUESTION') && (
+          <div className="w-full flex flex-col items-center gap-3">
+            {/* Player info strip */}
+            <div className="w-full flex flex-col sm:flex-row items-start sm:items-center justify-between text-xs md:text-sm font-bold text-amber-950 px-3.5 py-2 rounded-2xl bg-gradient-to-r from-amber-100/90 to-yellow-100/90 border border-amber-300/80 shadow-sm gap-2">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+                <span>
+                  Học sinh đang bắt vịt: <strong className="text-amber-900 text-sm md:text-base">{playerName}</strong> (Lớp {className})
+                </span>
+                <span className="px-2 py-0.5 rounded-lg bg-amber-600 text-white text-xs font-mono font-bold shadow-sm">
+                  {score} điểm
+                </span>
+              </div>
+              <div className="text-amber-900 font-semibold text-xs flex items-center gap-1.5">
+                <span className="px-2 py-0.5 rounded-md bg-red-600 text-white font-black text-[11px]">
+                  50 CHÚ VỊT SỐ 1 - 50
+                </span>
+                <span>Bắt được chú vịt số nào, câu hỏi sẽ hiện lên cho học sinh bắt vịt trả lời!</span>
+              </div>
+            </div>
+
+            {/* Village Yard Arena with 50 Numbered Ducks */}
+            <div className="w-full h-[50vh] md:h-[62vh] min-h-[350px]">
+              <VillageYard
+                ducks={ducks}
+                onCatchDuck={handleCatchDuck}
+                isPaused={isPaused || gameState === 'QUESTION'}
+                blindfoldMode={settings.blindfoldMode}
+                soundEnabled={soundEnabled}
+                virtualInput={virtualInput}
+              />
+            </div>
+
+            {/* 50 Numbered Ducks Grid (Huy hiệu 50 chú vịt trên sân) */}
+            <div className="w-full bg-white/90 backdrop-blur-sm rounded-2xl border border-amber-300/70 p-3 shadow-md">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-xs font-black text-amber-950 flex items-center gap-1.5 uppercase">
+                  <span>🦆 Trạng thái 50 Chú Vịt Đánh Số (Đã bắt: {ducks.filter(d => d.isCaught).length}/{ducks.length}):</span>
+                </div>
+                <div className="text-[11px] text-slate-500 font-medium hidden sm:block">
+                  Xanh lá (✅) = Đã bắt & trả lời đúng · Vàng (🦆) = Đang chạy trên sân
+                </div>
+              </div>
+              <div className="grid grid-cols-5 sm:grid-cols-10 md:grid-cols-10 gap-1.5 max-h-32 overflow-y-auto scrollbar-thin">
+                {ducks.map((duck) => (
+                  <div
+                    key={duck.id}
+                    className={`px-1.5 py-1 rounded-xl text-xs font-bold flex items-center justify-center gap-1 border transition-all text-center ${
+                      duck.isCaught
+                        ? 'bg-emerald-100 text-emerald-900 border-emerald-400 opacity-60'
+                        : 'bg-amber-50 text-amber-950 border-amber-300 hover:bg-amber-100 shadow-sm'
+                    }`}
+                  >
+                    <span className="w-5 h-5 rounded-md bg-red-600 text-white text-[10px] font-black flex items-center justify-center shrink-0">
+                      #{duck.duckNumber}
+                    </span>
+                    <span className="text-[11px]">
+                      {duck.isCaught ? '✅' : '🦆'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Mobile Touch Controls */}
+            <MobileControls onDirectionChange={handleDirectionChange} />
+          </div>
+        )}
+      </main>
+
+      {/* 3. MODALS */}
+      {/* Quiz Modal when a duck is caught (passes catcher name & class) */}
+      {gameState === 'QUESTION' && currentQuestion && caughtDuck && (
+        <QuestionModal
+          question={currentQuestion}
+          caughtDuck={caughtDuck}
+          catcherName={playerName}
+          catcherClass={className}
+          onAnswerResult={handleAnswerResult}
+        />
+      )}
+
+      {/* Rules Modal */}
+      {showRules && <RulesModal onClose={() => setShowRules(false)} />}
+
+      {/* Leaderboard Modal */}
+      {showLeaderboard && (
+        <LeaderboardModal
+          entries={leaderboard}
+          onClose={() => setShowLeaderboard(false)}
+          onClear={handleClearLeaderboard}
+        />
+      )}
+
+      {/* Teacher Settings */}
+      {showTeacherSettings && (
+        <TeacherSettingsModal
+          questions={questions}
+          students={students}
+          settings={settings}
+          onUpdateQuestions={handleUpdateQuestions}
+          onUpdateStudents={handleUpdateStudents}
+          onUpdateSettings={handleUpdateSettings}
+          onClose={() => setShowTeacherSettings(false)}
+        />
+      )}
+
+      {/* Quick Switch Student Modal during game */}
+      {showSwitchPlayerModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl border-4 border-amber-500">
+            <h3 className="text-lg font-black text-amber-950 mb-1">Đổi lượt học sinh bắt vịt</h3>
+            <p className="text-xs text-slate-600 mb-4">
+              Nhập tên bạn học sinh tiếp theo chuẩn bị lên bảng điều khiển bắt vịt:
+            </p>
+            <div className="space-y-3 mb-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Họ và tên học sinh:</label>
+                <input
+                  type="text"
+                  value={tempPlayerName}
+                  onChange={(e) => setTempPlayerName(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm font-bold focus:ring-2 focus:ring-amber-500 focus:outline-none"
+                  placeholder="VD: Trần Văn Nam"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Lớp:</label>
+                <input
+                  type="text"
+                  value={tempClassName}
+                  onChange={(e) => setTempClassName(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm font-bold focus:ring-2 focus:ring-amber-500 focus:outline-none"
+                  placeholder="VD: 7A2"
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setShowSwitchPlayerModal(false)}
+                className="px-4 py-2 text-xs font-bold text-slate-600 bg-slate-100 rounded-xl hover:bg-slate-200 cursor-pointer"
+              >
+                Hủy
+              </button>
+              <button
+                onClick={() => {
+                  if (tempPlayerName.trim()) {
+                    setPlayerName(tempPlayerName.trim());
+                    if (tempClassName.trim()) setClassName(tempClassName.trim());
+                  }
+                  setShowSwitchPlayerModal(false);
+                }}
+                className="px-5 py-2 text-xs font-bold text-white bg-amber-600 hover:bg-amber-700 rounded-xl shadow cursor-pointer"
+              >
+                Xác nhận đổi
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Game Over Modal */}
+      {gameState === 'GAME_OVER' && (
+        <GameOverModal
+          playerName={playerName}
+          className={className}
+          score={score}
+          ducksCaught={ducks.filter((d) => d.isCaught).length}
+          totalDucks={ducks.length || settings.duckCount}
+          correctAnswers={correctCount}
+          wrongAnswers={wrongCount}
+          onPlayAgain={startNewGame}
+          onOpenLeaderboard={() => setShowLeaderboard(true)}
+          onGoHome={() => setGameState('START')}
+        />
+      )}
+
+      {/* 4. FOOTER */}
+      <footer className="w-full py-2.5 px-4 bg-white/90 border-t border-amber-300 text-center text-xs md:text-sm text-amber-950 font-bold shadow-sm">
+        🦆 Trò chơi &quot;Bịt Mắt Bắt Vịt – AI Nhanh Hơn?&quot; · <span className="text-amber-800">Game tạo bởi GV Nguyễn Thị Thảo - Trường THCS Song Liễu</span>
+      </footer>
+    </div>
+  );
+}
